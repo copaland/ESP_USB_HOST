@@ -1,0 +1,257 @@
+
+# ESP32-S3 USB Memory Data Logger (ESP-IDF)
+
+ESP32-S3와 USB 호스트 스택을 사용하여 USB 메모리에 센서 데이터를 CSV 형식으로 저장하는 프로젝트입니다.
+
+**Framework**: ESP-IDF (Espressif IoT Development Framework)
+
+## 프로젝트 구조
+
+```
+project_root/
+├── src/
+│   └── main.cpp              # 메인 애플리케이션
+├── include/
+│   ├── config.h              # 핀 정의 및 설정
+│   ├── USBManager.h          # USB 연결 및 파일 I/O 관리
+│   ├── SensorManager.h       # 센서 데이터 수집 (레벨, RTC)
+│   └── PowerManager.h        # VBUS 전원 관리 (선택)
+├── CMakeLists.txt            # CMake 빌드 설정
+├── sdkconfig                 # ESP-IDF 설정
+└── platformio.ini            # PlatformIO 설정
+```
+
+## 주요 기능
+
+### USB 호스트 (Mass Storage)
+- USB 메모리 자동 감지 (VBUS 분압 회로)
+- FAT32 파일시스템 지원
+- USB 메모리에 CSV 파일 직접 저장
+- Over-current 보호
+
+### 센서 및 데이터 로깅
+- **레벨 센서**: ADC(GPIO2) - 0~100% 범위
+- **RTC**: PCF8563 (I2C) - 정확한 타임스탐프 기록
+- **VBUS 모니터링**: 분압 회로(47K+24.3K)를 통한 5V 감지
+- **10초 주기** 자동 저장
+
+### 상태 표시
+- **LED 인디케이터**:
+  - RED (GPIO4): 레벨 < 25%
+  - YELLOW (GPIO5): 25% ≤ 레벨 < 50%
+  - GREEN (GPIO6): 50% ≤ 레벨 < 75%
+  - BLUE (GPIO7): 레벨 ≥ 75%
+  - SIGNAL (GPIO47): USB 연결 상태
+
+- **부저 알림**:
+  - USB 연결: 2회 신호음
+  - USB 분리: 1회 길은 신호음
+  - 저장 오류: 3회 짧은 신호음
+
+## 하드웨어 연결
+
+### USB 연결 (GPIO19, GPIO20)
+```
+USB 메모리 D-  → GPIO19 (USB_DM)
+USB 메모리 D+  → GPIO20 (USB_DP)
+USB 메모리 GND → GND
+USB 메모리 5V  → 분압 회로
+```
+
+### VBUS 분압 회로 (5V 감지)
+```
+USB 5V ─[47K]─┬─[24.3K]─ GND
+              │
+         GPIO1 (ADC)
+```
+
+### I2C (RTC PCF8563)
+```
+GPIO8 (SDA) → RTC SDA
+GPIO9 (SCL) → RTC SCL
+```
+
+### 센서 및 제어
+```
+GPIO2  (ADC)       ← 레벨 센서
+GPIO10 (GPIO)      → VBUS Enable
+GPIO21 (GPIO)      ← Over-Current Flag
+GPIO4,5,6,7 (GPIO) → LED R,Y,G,B
+GPIO47 (GPIO)      → SIGNAL LED
+GPIO38 (GPIO)      → BUZZER
+```
+
+## 설치 및 빌드
+
+### 필수 설치
+1. **ESP-IDF** 설치:
+   ```bash
+   git clone --recursive https://github.com/espressif/esp-idf.git
+   cd esp-idf
+   ./install.sh esp32s3
+   source export.sh
+   ```
+
+2. **VS Code + PlatformIO**:
+   - PlatformIO Extension 설치
+   - 프로젝트 폴더 열기
+
+### 빌드 및 업로드
+
+#### PlatformIO 사용 (권장)
+```bash
+# 빌드
+platformio run -e esp32-s3
+
+# 업로드
+platformio run -e esp32-s3 -t upload
+
+# 시리얼 모니터
+platformio device monitor -e esp32-s3 -b 115200
+```
+
+#### ESP-IDF CLI 사용
+```bash
+# 빌드
+idf.py build
+
+# 업로드 (포트 설정 필요)
+idf.py -p /dev/ttyUSB0 flash
+
+# 모니터
+idf.py -p /dev/ttyUSB0 monitor
+```
+
+## CSV 파일 형식
+
+USB 메모리의 `/usb/data.csv`:
+```
+Timestamp,Level(%),VBUS(V),USB_Connected
+2024-01-30 10:30:45,45.23,5.00,1
+2024-01-30 10:30:55,45.18,5.01,1
+2024-01-30 10:31:05,45.20,4.99,1
+```
+
+## VBUS 분압 계산
+
+```
+원본 전압: USB 5V
+분압 저항: R1=47K, R2=24.3K
+-------
+Vout = Vin × R2/(R1+R2) = 5 × 24.3/71.3 ≈ 1.70V
+
+ADC 입력 (ESP32S3 3.3V 기준):
+ADC값 = Vout × 4095 / 3.3
+
+복원 공식:
+VBUS_V = (ADC값 × 3.3 / 4095) × (47K+24.3K)/24.3K
+       = (ADC값 × 3.3 / 4095) × 2.935
+```
+
+## 설정값 (config.h)
+
+| 항목 | 기본값 | 설명 |
+|------|--------|------|
+| USB_CHECK_INTERVAL | 500ms | USB 연결 상태 확인 주기 |
+| DATA_SAVE_INTERVAL | 10000ms | 데이터 저장 주기 (10초) |
+| SENSOR_READ_INTERVAL | 1000ms | 센서 읽기 주기 |
+| VBUS_THRESHOLD | 4.0V | USB 연결 판정 기준 |
+| ADC_SAMPLES | 10 | ADC 평균값 샘플 수 |
+
+## FreeRTOS Task 구조
+
+```
+┌─ app_main (메인)
+│
+├─ usb_monitor_task (Priority 5, Core 1)
+│  └─ USB 연결 상태 감시, 파일시스템 마운트/언마운트
+│
+├─ sensor_task (Priority 4, Core 1)
+│  └─ 센서 데이터 읽기, LED 상태 업데이트
+│
+├─ data_save_task (Priority 3, Core 1)
+│  └─ CSV 파일에 데이터 저장
+│
+└─ usb_lib_task (Priority 30, Core 0)
+   └─ USB 호스트 스택 이벤트 처리
+```
+
+## 문제 해결
+
+### USB 메모리가 인식되지 않음
+
+1. **VBUS 전압 확인**:
+   ```
+   시리얼 모니터 → "USB Connected (VBUS: 4.XX V)" 확인
+   ```
+
+2. **GPIO 연결 확인**:
+   - GPIO19 (D-) ↔ USB 메모리 D-
+   - GPIO20 (D+) ↔ USB 메모리 D+
+
+3. **분압 저항 확인**:
+   - 47K + 24.3K 저항이 올바르게 연결되었는지 확인
+
+### CSV 파일이 생성되지 않음
+
+1. "USB Connected" 메시지 확인
+2. `/usb/data.csv` 경로 확인
+3. 파일 시스템 마운트 여부 확인
+
+### RTC 시간이 잘못됨
+
+1. PCF8563 배터리 확인 (아래 링크 참고)
+2. I2C 버스 확인:
+   ```
+   GPIO8 (SDA) - GPIO9 (SCL) - 확인
+   ```
+3. RTC I2C 주소 확인 (기본값: 0x51)
+
+### 데이터 손실
+
+1. 버퍼링 시간 확인 (10초 주기)
+2. USB 메모리 안정성 확인
+3. 과전류 플래그 확인 (GPIO21)
+
+## ESP-IDF vs Arduino
+
+현재 프로젝트가 **ESP-IDF** 선택 이유:
+
+| 항목 | Arduino | ESP-IDF |
+|------|---------|---------|
+| USB Host | 제한적 | ✅ 완벽 지원 |
+| Mass Storage | 미지원 | ✅ FAT32 |
+| 안정성 | 중간 | ✅ 높음 |
+| 성능 | 중간 | ✅ 최적화 |
+| 메모리 | 낮음 | ✅ 효율적 |
+| 학습곡선 | 낮음 | 높음 |
+
+## 참고 자료
+
+- [ESP-IDF 공식 문서](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/)
+- [USB Host API](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/api-reference/peripherals/usb_host.html)
+- [PCF8563 RTC 데이터시트](https://www.nxp.com/docs/en/data-sheet/PCF8563.pdf)
+
+## 라이선스
+
+MIT License
+
+Including a header file produces the same results as copying the header file
+into each source file that needs it. Such copying would be time-consuming
+and error-prone. With a header file, the related declarations appear
+in only one place. If they need to be changed, they can be changed in one
+place, and programs that include the header file will automatically use the
+new version when next recompiled. The header file eliminates the labor of
+finding and changing all the copies as well as the risk that a failure to
+find one copy will result in inconsistencies within a program.
+
+In C, the convention is to give header files names that end with `.h'.
+
+Read more about using header files in official GCC documentation:
+
+* Include Syntax
+* Include Operation
+* Once-Only Headers
+* Computed Includes
+
+https://gcc.gnu.org/onlinedocs/cpp/Header-Files.html
